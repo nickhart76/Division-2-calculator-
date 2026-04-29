@@ -1,0 +1,1636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#070e1a">
+<link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Div2 DPS">
+<title>Division 2 DPS Calculator</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@700;800&family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #070e1a; font-family: 'Barlow', sans-serif; color: #c8d8e8; min-height: 100vh; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #070e1a; }
+  ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useRef } = React;
+
+// v2.0 — Heartbreaker, Tinkerer, Chest Talents, Per Bullet Damage
+function Tooltip({ id, text, openId, setOpenId }) {
+  const open = openId === id;
+  return (
+    <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      <span
+        onClick={e => { e.stopPropagation(); setOpenId(open ? null : id); }}
+        style={{ width: "16px", height: "16px", borderRadius: "50%", border: "1px solid #22d3ee60", background: open ? "#22d3ee30" : "#22d3ee15", color: "#22d3ee", fontSize: "0.6rem", fontWeight: "800", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, lineHeight: 1 }}
+      >i</span>
+      {open && (
+        <span
+          onClick={e => { e.stopPropagation(); setOpenId(null); }}
+          style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "80px", zIndex: 500, background: "#0a1f35", border: "1px solid #22d3ee40", borderRadius: "10px", padding: "0.7rem 0.9rem", fontSize: "0.7rem", color: "#d0e0ec", lineHeight: 1.6, width: "280px", boxShadow: "0 4px 24px #00000090" }}
+        >
+          {text}
+          <span style={{ display: "block", fontSize: "0.62rem", color: "#22d3ee80", marginTop: "0.4rem", textAlign: "right" }}>Tap to dismiss</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+function PressButton({ onClick, style, children }) {
+  const ref = useRef(null);
+
+  const down = () => {
+    if (ref.current) {
+      ref.current.style.transform = "scale(0.88)";
+      ref.current.style.filter = "brightness(1.8)";
+    }
+  };
+  const up = () => {
+    setTimeout(() => {
+      if (ref.current) {
+        ref.current.style.transform = "";
+        ref.current.style.filter = "";
+      }
+    }, 200);
+  };
+
+  return (
+    <button ref={ref} onClick={onClick}
+      onTouchStart={down} onTouchEnd={up}
+      onMouseDown={down} onMouseUp={up} onMouseLeave={up}
+      style={{ ...style, transition: "transform 0.2s, filter 0.2s" }}>
+      {children}
+    </button>
+  );
+}
+
+const STATS = [
+  { key: "dmg",        label: "Damage Per Bullet", unit: "",    min: 1000, max: 500000, step: 1000, def: 50000 },
+  { key: "cc",         label: "Crit Chance",        unit: "%",   min: 0,    max: 60,     step: 6,    def: 60    },
+  { key: "cd",         label: "Crit Damage",        unit: "%",   min: 0,    max: 1000,   step: 12,   def: 150   },
+  { key: "hsd",        label: "Headshot Damage",    unit: "%",   min: 0,    max: 300,    step: 10,   def: 0     },
+  { key: "rof",        label: "Rate of Fire",        unit: " RPM",min: 100,  max: 1200,   step: 10,   def: 600   },
+  { key: "mag",        label: "Mag Size",            unit: "",    min: 1,    max: 400,    step: 5,    def: 60    },
+  { key: "baseReload", label: "Base Reload Time",    unit: "s",   min: 0.5,  max: 6.0,    step: 0.1,  def: 3.0   },
+];
+
+const COLOR = {
+  dmg:        "#f97316",
+  cc:         "#22d3ee",
+  cd:         "#a78bfa",
+  hsd:        "#f59e0b",
+  rof:        "#4ade80",
+  mag:        "#f472b6",
+  baseReload: "#94a3b8",
+};
+
+const DEFAULTS = Object.fromEntries(STATS.map(s => [s.key, s.def]));
+
+// Division 2 damage formula:
+// dmg × (1 + WD%) × (1 + TWD%) × critMult × (1 + DtA+DtH%) × (1 + DtOoC%) × Π(1+AmpN%)
+// WD%  = weapon damage + weapon type damage (additive bucket)
+// TWD% = total weapon damage from talents + gear sets (additive bucket)
+// DtA/DtH = additive within their bucket, multiplicative with everything else
+// Each Amplifier is its own multiplicative bucket
+
+function calcStats(v, modifiers = {}) {
+  const {
+    wd = 0, twd = 0,
+    dta = 0, dth = 0, dtooc = 0,
+    amp1 = 0, amp2 = 0,
+    amps = [],
+    strikerTWD = 0, hbAmp = 1,
+    frenzyWD = 0, frenzyRoF = 0, flatlineAmp = 0,
+    expertise = 0,
+    obliterateTWD = 0,
+    measuredOn = false,
+  } = modifiers;
+
+  const baseDmg      = v.dmg * (1 + expertise / 100);
+  const wdMult       = 1 + (wd + frenzyWD) / 100;
+  const twdMult      = 1 + (twd + strikerTWD + obliterateTWD) / 100;
+  const dtMult       = 1 + (dta + dth) / 100;
+  const oocMult      = 1 + dtooc / 100;
+  const ampMult      = [...amps, flatlineAmp].reduce((acc, a) => acc * (1 + a / 100), hbAmp);
+  const critMult     = 1 + (v.cc / 100) * (v.cd / 100);
+  const rofMult      = (v.rof / 60) * (1 + frenzyRoF / 100);
+  const effectiveRoF = v.rof * (1 + frenzyRoF / 100);
+  // Measured avg DPS: top half -15%WD +25%RoF, bot half +30%WD -18%RoF
+  // avg = (0.85+1.30) / (1/1.25 + 1/0.82) = 2.15 / 2.0195 ≈ 1.0646
+  const measuredMult = measuredOn ? (2.15 / 2.0195) : 1;
+  const burstDPS     = baseDmg * wdMult * rofMult * critMult * twdMult * dtMult * oocMult * ampMult * measuredMult;
+  const reloadTime   = v.baseReload;
+  const timeInMag    = measuredOn
+    ? (v.mag/2)/(effectiveRoF*1.25/60) + (v.mag/2)/(effectiveRoF*0.82/60)
+    : v.mag / (effectiveRoF / 60);
+  const sustainedDPS = burstDPS * (timeInMag / (timeInMag + reloadTime));
+  return { burstDPS, sustainedDPS, reloadTime, effectiveRoF, baseDmg };
+}
+
+function simulateMagCycle({ vals, strikerOn, strikerBP, heartbreakerOn, chestPiece, mods = {} }) {
+  const rof             = vals.rof;
+  const mag             = vals.mag;
+  const strikerChest    = chestPiece === 'striker';
+  const heartbreakerChest = chestPiece === 'heartbreaker';
+  const sMax     = strikerChest ? 200 : 100;
+  const hMax     = heartbreakerChest ? 100 : 50;
+  const sPctPS   = strikerBP ? 0.9 : 0.65;
+  const critMult = 1 + (vals.cc / 100) * (vals.cd / 100);
+  const reloadMs = vals.baseReload * 1000;
+  const maxCycles = 15;
+
+  const { wd=0, twd=0, dta=0, dth=0, dtooc=0, amps=[], frenzyWD=0, frenzyRoF=0, flatlineAmp=0, expertise=0, obliterateTWD=0, measuredOn=false } = mods;
+  const baseDmg   = vals.dmg * (1 + expertise / 100);
+  const wdMult    = 1 + (wd + frenzyWD) / 100;
+  const dtMult    = 1 + (dta + dth) / 100;
+  const oocMult   = 1 + dtooc / 100;
+  const staticAmp = [...amps, flatlineAmp].reduce((acc, a) => acc * (1 + a / 100), 1);
+  const effectiveRoF = rof * (1 + frenzyRoF / 100);
+
+  // Measured: per-bullet RoF and WD modifiers based on which half of mag
+  const getMeasuredRoFMult = (bi) => !measuredOn ? 1 : bi < mag/2 ? 1.25 : 0.82;
+  const getMeasuredWDMult  = (bi) => !measuredOn ? 1 : bi < mag/2 ? 0.85 : 1.30;
+
+  // Mag fire time accounts for Measured RoF phases
+  const magMs = measuredOn
+    ? Math.ceil(((mag/2)/(effectiveRoF*1.25) + (mag/2)/(effectiveRoF*0.82)) * 60000)
+    : Math.ceil((mag / effectiveRoF) * 60000);
+  const sampleEvery = Math.max(1, Math.round((magMs + reloadMs) / 150));
+
+  // Obliterate: +1% TWD per expected crit, max 25, decay rate 1/5s
+  // per-ms decay: obStacks -= obStacks/5000 (exponential approx)
+  // per-shot gain: obStacks += cc/100 (expected crits per shot)
+  const obliterateOn = obliterateTWD > 0;
+
+  const calcDmg = (sStacks, hStacks, bi, obStacks) => {
+    const strikerTWD = strikerOn ? sStacks * sPctPS : 0;
+    const obTWD      = obliterateOn ? obStacks : 0;
+    const twdMult    = 1 + (twd + strikerTWD + obTWD) / 100;
+    const hbAmp      = heartbreakerOn ? 1 + hStacks * 1.1 / 100 : 1;  // 1.1% per stack
+    return baseDmg * wdMult * getMeasuredWDMult(bi) * critMult * twdMult * dtMult * oocMult * staticAmp * hbAmp;
+  };
+
+  let sStacks = 0, hStacks = 0, obStacks = 0;
+  let globalMs = 0;
+  const points = [];
+  let firstCycleMagEnd = null;
+  let totalDamage = 0, totalFiringMs = 0;
+  let startDPS = null, peakDPS = 0;
+
+  for (let cycle = 0; cycle < maxCycles; cycle++) {
+    const prevSStacks = sStacks;
+    let bulletsLeft = mag;
+    let nextShotMs  = 0;
+    let cycleDmg    = 0;
+
+    // Firing phase
+    for (let ms = 0; ms < magMs; ms++) {
+      if (strikerOn) {
+        const decayPerMs = sStacks <= 50 ? 0.001 : sStacks <= 100 ? 0.002 : 0.003;
+        sStacks = Math.max(0, sStacks - decayPerMs);
+      }
+      if (heartbreakerOn) hStacks = Math.max(0, hStacks - 0.002);
+      if (obliterateOn)   obStacks = Math.max(0, obStacks - obStacks / 5000);
+
+      if (ms >= nextShotMs && bulletsLeft > 0) {
+        const bi = mag - bulletsLeft;
+        if (strikerOn)      sStacks  = Math.min(sMax, sStacks + 1);
+        if (heartbreakerOn) hStacks  = Math.min(hMax, hStacks + 1);
+        if (obliterateOn)   obStacks = Math.min(25, obStacks + vals.cc / 100);
+        cycleDmg   += calcDmg(sStacks, hStacks, bi, obStacks);
+        bulletsLeft--;
+        nextShotMs += 60000 / (effectiveRoF * getMeasuredRoFMult(bi));
+      }
+
+      if ((globalMs + ms) % sampleEvery === 0) {
+        const bi      = Math.max(0, mag - bulletsLeft - 1);
+        const mRoF    = getMeasuredRoFMult(bi);
+        const instDPS = calcDmg(sStacks, hStacks, bi, obStacks) * (effectiveRoF * mRoF / 60);
+        if (startDPS === null) startDPS = instDPS;
+        if (instDPS > peakDPS) peakDPS = instDPS;
+        points.push({ time: +((globalMs + ms) / 1000).toFixed(3), dps: +instDPS.toFixed(0), stacks: +(strikerOn ? sStacks : hStacks).toFixed(1), phase: 'fire', cycle });
+      }
+    }
+
+    if (cycle === 0) firstCycleMagEnd = (globalMs + magMs) / 1000;
+    totalDamage   += cycleDmg;
+    totalFiringMs += magMs;
+    globalMs      += magMs;
+
+    // Reload phase
+    const magEndDPS = points.length > 0 ? points[points.length - 1].dps : 0;
+    for (let ms = 0; ms < reloadMs; ms++) {
+      if (strikerOn) {
+        const decayPerMs = sStacks <= 50 ? 0.001 : sStacks <= 100 ? 0.002 : 0.003;
+        sStacks = Math.max(0, sStacks - decayPerMs);
+      }
+      if (heartbreakerOn) hStacks  = Math.max(0, hStacks - 0.002);
+      if (obliterateOn)   obStacks = Math.max(0, obStacks - obStacks / 5000);
+
+      if ((globalMs + ms) % sampleEvery === 0) {
+        const progress     = ms / reloadMs;
+        const nextStartDPS = calcDmg(sStacks, hStacks, 0, obStacks) * (effectiveRoF * getMeasuredRoFMult(0) / 60);
+        const reloadDPS    = magEndDPS + (nextStartDPS - magEndDPS) * progress;
+        points.push({ time: +((globalMs + ms) / 1000).toFixed(3), dps: +reloadDPS.toFixed(0), stacks: +(strikerOn ? sStacks : hStacks).toFixed(1), phase: 'reload', cycle });
+      }
+    }
+    globalMs += reloadMs;
+
+    const stackGrowth = sStacks - prevSStacks;
+    if (cycle > 1 && stackGrowth < 0.5) break;
+  }
+
+  const totalTimeS = globalMs / 1000;
+  return {
+    points,
+    magDurationS:     firstCycleMagEnd ?? 0,
+    totalTimeS,
+    avgFiringDPS:     totalFiringMs > 0 ? totalDamage / (totalFiringMs / 1000) : 0,
+    trueSustainedDPS: totalTimeS > 0 ? totalDamage / totalTimeS : 0,
+    startDPS:         startDPS ?? 0,
+    peakDPS,
+  };
+}
+
+
+function DPSChart({ points, magDurationS, baseDPS, snapPoints, zoom, onZoomChange, onFitZoom, clearFlag }) {
+  const [tooltip, setTooltip] = React.useState(null);
+
+  React.useEffect(() => { setTooltip(null); }, [clearFlag]);
+  const [containerW, setContainerW] = React.useState(300);
+  const containerRef = React.useRef(null);
+  const svgRef       = React.useRef(null);
+  const isDragging   = React.useRef(false);
+
+  if (!points || points.length === 0) return null;
+
+  const H = 280, PL = 72, PR = 52, PT = 16, PB = 38;
+  const iH = H - PT - PB;
+  const allDPS    = [...points.map(p => p.dps), ...(snapPoints ? snapPoints.map(p => p.dps) : []), baseDPS ?? 1];
+  const maxDPS    = Math.max(...allDPS, 1);
+  const maxStacks = Math.max(...points.map(p => p.stacks ?? 0), 1);
+  const maxTime   = Math.max(points[points.length-1]?.time ?? 1, snapPoints ? (snapPoints[snapPoints.length-1]?.time ?? 1) : 1);
+
+  const fitZoomRef = React.useRef(0.15);
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+    const w = containerRef.current.offsetWidth;
+    const fitZoom = Math.max(0.05, (w - 4) / (maxTime * 55));
+    fitZoomRef.current = fitZoom;
+    if (onFitZoom) onFitZoom(fitZoom);
+    onZoomChange(z => (z <= 0.15) ? fitZoom : z);
+  }, [maxTime]);
+
+  const PX = 55 * (zoom ?? 0.15);
+  const CW = maxTime * PX + 20;
+
+  const toX  = t => t * PX;
+  const toY  = d => PT + iH - (d / maxDPS) * iH;
+  const toSY = s => PT + iH - (s / maxStacks) * iH;
+  const fmt  = v => v >= 1000000 ? (v/1000000).toFixed(2)+"M" : v >= 1000 ? (v/1000).toFixed(1)+"k" : String(Math.round(v));
+
+  const buildSegs = (pts) => {
+    const segs=[]; let fs=[],rs=[];
+    for (const p of pts) {
+      if (p.phase==="fire") { if(rs.length){segs.push({type:"reload",pts:rs});rs=[];} fs.push(p); }
+      else { if(fs.length){segs.push({type:"fire",pts:fs});fs=[];} rs.push(p); }
+    }
+    if(fs.length) segs.push({type:"fire",pts:fs});
+    if(rs.length) segs.push({type:"reload",pts:rs});
+    return segs;
+  };
+  const segs     = buildSegs(points);
+  const snapSegs = snapPoints ? buildSegs(snapPoints) : [];
+
+  const tickStep = PX < 20 ? 10 : PX < 40 ? 5 : PX < 80 ? 2 : 1;
+  const yTicks   = [0,0.25,0.5,0.75,1].map(f => ({val:Math.round(maxDPS*f), y:toY(maxDPS*f)}));
+  const sTicks   = [0,0.25,0.5,0.75,1].map(f => ({val:Math.round(maxStacks*f), y:toSY(maxStacks*f)}));
+  const xTicks   = [];
+  for (let t=0; t<=Math.ceil(maxTime); t+=tickStep) xTicks.push({t, x:toX(t)});
+  const baseY    = baseDPS ? toY(baseDPS) : null;
+  const lH       = snapPoints ? 58 : 44;
+  const tx       = tooltip ? toX(tooltip.time) : null;
+
+  const getNearest = (clientX) => {
+    if (!svgRef.current) return null;
+    const rect = svgRef.current.getBoundingClientRect();
+    const time = Math.max(0, Math.min(maxTime, (clientX - rect.left) / PX));
+    let best=null, bd=Infinity;
+    for (const p of points) { const d=Math.abs(p.time-time); if(d<bd){bd=d;best=p;} }
+    return best;
+  };
+
+  React.useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const down   = e => { e.stopPropagation(); isDragging.current=true; const cx=(e.touches?e.touches[0]:e).clientX; const p=getNearest(cx); if(p) setTooltip(p); };
+    const move   = e => { if(!isDragging.current) return; const cx=(e.touches?e.touches[0]:e).clientX; const p=getNearest(cx); if(p) setTooltip(p); };
+    const up     = () => { isDragging.current=false; };
+    const noClick = e => e.stopPropagation();
+    el.addEventListener("mousedown",  down);
+    el.addEventListener("mousemove",  move);
+    el.addEventListener("mouseup",    up);
+    el.addEventListener("click",      noClick);
+    el.addEventListener("touchstart", down,   {passive:true});
+    el.addEventListener("touchmove",  move,   {passive:true});
+    el.addEventListener("touchend",   up);
+    return () => {
+      el.removeEventListener("mousedown",  down);
+      el.removeEventListener("mousemove",  move);
+      el.removeEventListener("mouseup",    up);
+      el.removeEventListener("click",      noClick);
+      el.removeEventListener("touchstart", down);
+      el.removeEventListener("touchmove",  move);
+      el.removeEventListener("touchend",   up);
+    };
+  }, [points, PX, maxTime]);
+
+  return (
+    <div>
+      {tooltip && (
+        <div style={{display:"flex",gap:"0.5rem",marginBottom:"0.5rem",flexWrap:"wrap"}}>
+          {[{l:"Time",v:tooltip.time.toFixed(2)+"s",c:"#e8f0f8",b:"#1a3050"},
+            {l:"DPS", v:fmt(tooltip.dps),            c:"#22d3ee",b:"#22d3ee40"},
+            {l:"Stacks",v:Math.round(tooltip.stacks??0),c:"#4ade80",b:"#4ade8040"},
+            {l:"Phase",v:tooltip.phase==="fire"?"Firing":"Reload",c:tooltip.phase==="fire"?"#f97316":"#94a3b8",b:"#1a3050"},
+          ].map(({l,v,c,b}) => (
+            <div key={l} style={{background:"#060f1c",borderRadius:"6px",padding:"0.4rem 0.7rem",border:"1px solid " + b}}>
+              <div style={{fontSize:"0.58rem",color:"#d0e0ec",textTransform:"uppercase",letterSpacing:"0.08em"}}>{l}</div>
+              <div style={{fontFamily:"'Rajdhani',sans-serif",fontSize:"1rem",fontWeight:"800",color:c}}>{v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{display:"flex",borderRadius:"6px",overflow:"hidden"}} onClick={e => e.stopPropagation()}>
+        <div style={{flexShrink:0,width:PL}}>
+          <svg width={PL} height={H} style={{display:"block"}}>
+            {yTicks.map((t,i) => <text key={i} x={PL-6} y={t.y+4} textAnchor="end" fill="#22d3ee" fontSize="13" fontFamily="Barlow,sans-serif">{fmt(t.val)}</text>)}
+            {tx !== null && <line x1={0} y1={toY(tooltip.dps)} x2={PL} y2={toY(tooltip.dps)} stroke="#ffffff30" strokeWidth={1} strokeDasharray="3,2" />}
+            <line x1={PL-1} y1={PT} x2={PL-1} y2={PT+iH} stroke="#22d3ee60" strokeWidth={1.5} />
+            <text x={13} y={PT+iH/2} textAnchor="middle" fill="#22d3ee80" fontSize="13" fontFamily="Barlow,sans-serif" transform={`rotate(-90,13,${PT+iH/2})`}>DPS</text>
+          </svg>
+        </div>
+        <div ref={containerRef} style={{flex:1,overflowX:"auto",overflowY:"hidden",WebkitOverflowScrolling:"touch"}} onClick={e => e.stopPropagation()}>
+          <svg ref={svgRef} viewBox={`0 0 ${CW} ${H}`} width={CW} height={H} style={{display:"block",cursor:"crosshair"}}>
+            {yTicks.map((t,i) => <line key={i} x1={0} y1={t.y} x2={CW} y2={t.y} stroke="#1a2535" strokeWidth={1} />)}
+            {xTicks.map((t,i) => (
+              <g key={i}>
+                <line x1={t.x} y1={PT} x2={t.x} y2={PT+iH} stroke="#1a2535" strokeWidth={1} />
+                <text x={t.x} y={PT+iH+16} textAnchor="middle" fill="#22d3eeaa" fontSize="13" fontFamily="Barlow,sans-serif">{t.t}s</text>
+              </g>
+            ))}
+            {baseY && <line x1={0} y1={baseY} x2={CW} y2={baseY} stroke="#f9731660" strokeWidth={1.5} strokeDasharray="5,4" />}
+            {baseY && <text x={CW-4} y={baseY-5} textAnchor="end" fill="#f97316dd" fontSize="12" fontFamily="Barlow,sans-serif" fontWeight="600">Base {fmt(Math.round(baseDPS))}</text>}
+            {snapSegs.map((s,i) => <polyline key={i} points={s.pts.map(p=>toX(p.time).toFixed(1)+","+toY(p.dps).toFixed(1)).join(" ")} fill="none" stroke="#f9731680" strokeWidth={1.5} strokeDasharray={s.type==="reload"?"4,3":"none"} strokeLinejoin="round" />)}
+            {segs.map((s,i) => <polyline key={i} points={s.pts.map(p=>toX(p.time).toFixed(1)+","+toY(p.dps).toFixed(1)).join(" ")} fill="none" stroke="#22d3ee" strokeWidth={2} strokeDasharray={s.type==="reload"?"5,3":"none"} strokeLinejoin="round" />)}
+            <polyline points={points.map(p=>toX(p.time).toFixed(1)+","+toSY(p.stacks??0).toFixed(1)).join(" ")} fill="none" stroke="#4ade80" strokeWidth={1.5} strokeLinejoin="round" strokeOpacity="0.85" />
+            {points.length > 0 && (function(){ const last=points[points.length-1]; return <text x={toX(last.time)-4} y={toSY(last.stacks??0)-8} textAnchor="end" fill="#4ade80" fontSize="12" fontFamily="Barlow,sans-serif" fontWeight="700">{Math.round(last.stacks??0)}</text>; }())}
+            {tx !== null && (
+              <g>
+                <line x1={tx} y1={PT} x2={tx} y2={PT+iH} stroke="#ffffff50" strokeWidth={1.5} strokeDasharray="3,2" />
+                <circle cx={tx} cy={toY(tooltip.dps)} r={7} fill="#22d3ee" stroke="#070e1a" strokeWidth={2} />
+                <circle cx={tx} cy={toSY(tooltip.stacks??0)} r={7} fill="#4ade80" stroke="#070e1a" strokeWidth={2} />
+              </g>
+            )}
+            <g transform={`translate(${CW-108},${PT+iH-lH-6})`}>
+              <rect x={0} y={0} width={104} height={lH} rx={4} fill="#0a1525cc" />
+              <line x1={6} y1={12} x2={22} y2={12} stroke="#22d3ee" strokeWidth={2} />
+              <text x={26} y={16} fill="#22d3ee" fontSize="11" fontFamily="Barlow,sans-serif">DPS</text>
+              <line x1={6} y1={26} x2={22} y2={26} stroke="#4ade80" strokeWidth={2} />
+              <text x={26} y={30} fill="#4ade80" fontSize="11" fontFamily="Barlow,sans-serif">Stacks</text>
+              <line x1={6} y1={40} x2={22} y2={40} stroke="#f97316" strokeWidth={1.5} strokeDasharray="4,3" />
+              <text x={26} y={44} fill="#f97316" fontSize="11" fontFamily="Barlow,sans-serif">Base DPS</text>
+              {snapPoints && <line x1={6} y1={54} x2={22} y2={54} stroke="#f9731680" strokeWidth={1.5} strokeDasharray="4,3" />}
+              {snapPoints && <text x={26} y={58} fill="#f97316aa" fontSize="11" fontFamily="Barlow,sans-serif">Previous</text>}
+            </g>
+            <line x1={0} y1={PT+iH} x2={CW} y2={PT+iH} stroke="#b0c8d8" strokeWidth={1.5} />
+          </svg>
+        </div>
+        <div style={{flexShrink:0,width:PR}}>
+          <svg width={PR} height={H} style={{display:"block"}}>
+            <line x1={1} y1={PT} x2={1} y2={PT+iH} stroke="#b0c8d8" strokeWidth={1} />
+            {sTicks.map((t,i) => <text key={i} x={8} y={t.y+4} fill="#4ade80aa" fontSize="11" fontFamily="Barlow,sans-serif">{Math.round(t.val)}</text>)}
+            {tx !== null && <line x1={0} y1={toSY(tooltip.stacks??0)} x2={PR} y2={toSY(tooltip.stacks??0)} stroke="#ffffff30" strokeWidth={1} strokeDasharray="3,2" />}
+            <text x={PR-8} y={PT+iH/2} textAnchor="middle" fill="#4ade8080" fontSize="11" fontFamily="Barlow,sans-serif" transform={`rotate(90,${PR-8},${PT+iH/2})`}>STACKS</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NumPad({ label, value, color, allowDecimal, onConfirm, onClose }) {
+  const [draft, setDraft] = useState('');
+
+  const press = (key) => {
+    if (key === '⌫') { setDraft(d => d.length > 1 ? d.slice(0, -1) : ''); return; }
+    if (key === '.' && draft.includes('.')) return;
+    if (key === '.' && draft === '') { setDraft('0.'); return; }
+    if (key === '0' && draft === '0') return;
+    setDraft(d => d === '0' ? key : d + key);
+  };
+
+  const confirm = () => {
+    const n = parseFloat(draft);
+    if (!isNaN(n)) onConfirm(n);
+    else onConfirm(value); // keep old value if nothing entered
+    onClose();
+  };
+
+  const keys = ['7','8','9','4','5','6','1','2','3','.','0','⌫'];
+
+  return (
+    <div style={{
+      position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 1000,
+      background: '#0a1525', borderTop: '1px solid #1a3050',
+      borderRadius: '16px 16px 0 0', padding: '0.8rem 1rem 1.2rem',
+      boxShadow: '0 -8px 32px #00000080'
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.7rem' }}>
+        <span style={{ fontSize: '0.7rem', letterSpacing: '0.12em', textTransform: 'uppercase', color: '#5a7a9a' }}>{label}</span>
+        <PressButton onClick={onClose} style={{ background: 'none', border: '1px solid #2a3a50', borderRadius: '6px', color: '#5a7a9a', fontSize: '0.7rem', fontWeight: '700', padding: '0.2rem 0.6rem', cursor: 'pointer' }}>Cancel</PressButton>
+      </div>
+
+      {/* Display — shows placeholder when empty */}
+      <div style={{
+        background: '#060f1c', borderRadius: '8px', padding: '0.6rem 1rem',
+        marginBottom: '0.8rem', textAlign: 'right',
+        fontFamily: "'Rajdhani',sans-serif", fontSize: '2rem', fontWeight: '800',
+        color: draft === '' ? color + '40' : color,
+        border: "1px solid " + color + "40", letterSpacing: '0.05em'
+      }}>
+        {draft === '' ? String(value) : draft}
+      </div>
+
+      {/* Keys */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '0.6rem' }}>
+        {keys.map((k, i) => (
+          <PressButton key={i} onClick={() => press(k)} style={{
+            height: '52px', borderRadius: '10px',
+            background: k === '⌫' ? '#1a2535' : '#0d1f35',
+            border: "1px solid " + (k === '⌫' ? '#2a3a50' : k === '.' ? color + '40' : '#1a2f45'),
+            color: k === '⌫' ? '#f87171' : k === '.' ? color : '#e8f0f8',
+            fontSize: k === '⌫' ? '1.4rem' : '1.5rem',
+            fontWeight: '700', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: "'Rajdhani',sans-serif"
+          }}>{k}</PressButton>
+        ))}
+      </div>
+
+      {/* Confirm */}
+      <PressButton onClick={confirm} style={{
+        width: '100%', height: '52px', borderRadius: '10px',
+        background: color + "20", border: "1px solid " + color + "60",
+        color, fontSize: '1rem', fontWeight: '700', letterSpacing: '0.1em',
+        textTransform: 'uppercase', cursor: 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center'
+      }}>✓ Confirm</PressButton>
+    </div>
+  );
+}
+
+function Slider({ cfg, value, onChange, direction, subInfo, contrib, pctStep, pctBase }) {
+  const [editing, setEditing] = useState(false);
+  const [pctMode, setPctMode] = useState(false);
+  const color = COLOR[cfg.key];
+  const pct   = ((value - cfg.min) / (cfg.max - cfg.min)) * 100;
+  const canPctMode = ["dmg", "mag"].includes(cfg.key);
+
+  const commit = (n) => {
+    if (!isNaN(n)) onChange(Math.min(cfg.max, Math.max(cfg.min, n)));
+    setEditing(false);
+  };
+
+  const fixedStep  = pctStep ? Math.round((pctBase ?? value) * pctStep) : null;
+  const activeStep = pctMode ? Math.max(1, Math.round(value * 0.05)) : (fixedStep ?? cfg.step);
+  const decrement  = () => onChange(Math.max(cfg.min, +(value - activeStep).toFixed(2)));
+  const increment  = () => onChange(Math.min(cfg.max, +(value + activeStep).toFixed(2)));
+  const subLabel   = pctStep ? `±${fixedStep} RPM per step (5% of ${pctBase})` : pctMode ? `±${activeStep} per step (5%)` : null;
+
+  const btnStyle = {
+    width: "36px", height: "36px", borderRadius: "8px",
+    border: "1px solid " + color + "40", background: color + "12",
+    color, fontSize: "1.2rem", fontWeight: "700", cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    flexShrink: 0, userSelect: "none", lineHeight: 1,
+  };
+
+  const arrowColor = direction === "up" ? "#4ade80" : direction === "down" ? "#f87171" : null;
+  const arrowText  = direction === "up" ? "▲ INCREASE" : direction === "down" ? "▼ DECREASE" : null;
+
+  const displayVal = cfg.step < 1
+    ? value.toFixed(1)
+    : cfg.key === "dmg"
+      ? value.toLocaleString()
+      : value;
+
+  return (
+    <div style={{ marginBottom: "1.1rem" }}>
+      {editing && (
+        <NumPad
+          label={cfg.label}
+          value={displayVal}
+          color={color}
+          allowDecimal={cfg.step < 1}
+          onConfirm={commit}
+          onClose={() => setEditing(false)}
+        />
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
+        <span style={{ fontSize: "0.7rem", letterSpacing: "0.1em", textTransform: "uppercase", color: "#d0e0ec" }}>
+          {cfg.label}
+        </span>
+        <span
+          onClick={() => setEditing(true)}
+          style={{
+            fontSize: "1rem", fontWeight: "700", color,
+            fontFamily: "'Rajdhani', sans-serif", letterSpacing: "0.05em",
+            cursor: "pointer", borderBottom: "1px dashed " + color + "60", paddingBottom: "1px"
+          }}
+        >
+          {displayVal}{cfg.unit}
+        </span>
+      </div>
+
+      {(direction !== undefined) && (
+        <div style={{ height: "26px", marginBottom: "0.4rem", display: "flex", alignItems: "center" }}>
+          {arrowText && (
+            <div style={{
+              display: "inline-flex", alignItems: "center",
+              padding: "0.18rem 0.5rem",
+              background: arrowColor + "18", borderRadius: "4px",
+              border: "1px solid " + arrowColor + "40"
+            }}>
+              <span style={{ fontSize: "0.72rem", fontWeight: "700", color: arrowColor, letterSpacing: "0.1em" }}>
+                {arrowText}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <PressButton style={btnStyle} onClick={decrement}>−</PressButton>
+        <div style={{ flex: 1, position: "relative", height: "5px", borderRadius: "3px", background: "#1a2535" }}>
+          <div style={{ position: "absolute", left: 0, top: 0, height: "100%", borderRadius: "3px", width: `${pct}%`, background: color }} />
+          <input
+            type="range" min={cfg.min} max={cfg.max} step={cfg.step} value={value}
+            onChange={e => {
+              const raw = parseFloat(e.target.value);
+              const snapStep = activeStep;
+              const snapped = Math.round(raw / snapStep) * snapStep;
+              onChange(Math.min(cfg.max, Math.max(cfg.min, snapped)));
+            }}
+            style={{
+              position: "absolute", top: "50%", left: 0, width: "100%",
+              transform: "translateY(-50%)", opacity: 0, cursor: "pointer",
+              height: "20px", margin: 0, touchAction: "pan-y"
+            }}
+          />
+        </div>
+        <PressButton style={btnStyle} onClick={increment}>+</PressButton>
+        {canPctMode && (
+          <PressButton
+            onClick={() => setPctMode(p => !p)}
+            style={{
+              width: "36px", height: "36px", borderRadius: "8px",
+              border: "1px solid " + (pctMode ? color : color + "40"),
+              background: pctMode ? color + "30" : color + "08",
+              color: pctMode ? color : color + "80",
+              fontSize: "0.65rem", fontWeight: "700", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              flexShrink: 0, userSelect: "none",
+            }}
+          >5%</PressButton>
+        )}
+      </div>
+
+      {(subInfo || subLabel) && (
+        <div style={{ marginTop: "0.35rem", fontSize: "0.65rem", color: "#d0e0ec", paddingLeft: "44px" }}>
+          {subInfo || subLabel}
+        </div>
+      )}
+
+      {contrib && (
+        <div style={{ marginTop: "0.25rem", paddingLeft: "44px", display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+          {contrib.burstPct !== null && (
+            <span style={{
+              fontSize: "0.68rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif",
+              color: contrib.burstPct >= 0 ? "#4ade80" : "#f87171"
+            }}>
+              Burst: {contrib.burstPct >= 0 ? "+" : ""}{contrib.burstPct.toFixed(1)}%
+            </span>
+          )}
+          {contrib.sustainPct !== null && (
+            <span style={{
+              fontSize: "0.68rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif",
+              color: contrib.sustainPct >= 0 ? "#4ade80" : "#f87171"
+            }}>
+              Sustained: {contrib.sustainPct >= 0 ? "+" : ""}{contrib.sustainPct.toFixed(1)}%
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompareRow({ label, startVal, newVal, unit = "", decimals = 0, higherIsBetter = true }) {
+  const improved = higherIsBetter ? newVal > startVal : newVal < startVal;
+  const same     = Math.abs(newVal - startVal) < 0.01;
+  const arrow    = same ? "—" : improved ? "▲" : "▼";
+  const arrowCol = same ? "#c0d4e4" : improved ? "#4ade80" : "#f87171";
+  const pctChange = startVal !== 0 ? ((newVal - startVal) / startVal * 100) : 0;
+  const pctStr   = same ? "" : `${pctChange > 0 ? "+" : ""}${pctChange.toFixed(1)}%`;
+  const fmt      = (n) => decimals > 0 ? n.toFixed(decimals) : n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+
+  return (
+    <div style={{ padding: "0.6rem 0.9rem", borderBottom: "1px solid #0d1a28" }}>
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <span style={{ fontSize: "0.65rem", letterSpacing: "0.1em", textTransform: "uppercase", color: "#d0e0ec", flex: "0 0 90px" }}>
+          {label}
+        </span>
+        <span style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "1rem", fontWeight: "700", color: "#d0e0ec", flex: 1, textAlign: "right" }}>
+          {fmt(startVal)}{unit}
+        </span>
+        <span style={{ fontSize: "1.1rem", fontWeight: "800", color: arrowCol, width: "32px", textAlign: "center" }}>
+          {arrow}
+        </span>
+        <span style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "1rem", fontWeight: "700", color: same ? "#d0e0ec" : improved ? "#4ade80" : "#f87171", flex: 1 }}>
+          {fmt(newVal)}{unit}
+        </span>
+      </div>
+      {!same && (
+        <div style={{ textAlign: "right", paddingRight: "0px", marginTop: "0.15rem" }}>
+          <span style={{
+            fontSize: "0.68rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif",
+            color: improved ? "#4ade80" : "#f87171",
+            background: improved ? "#4ade8018" : "#f8717118",
+            border: "1px solid " + (improved ? "#4ade8040" : "#f8717140"),
+            borderRadius: "4px", padding: "0.1rem 0.4rem"
+          }}>
+            {pctStr}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Section({ id, title, summary, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div id={id} className="section" style={{ background: "#0a1525", border: "1px solid #1a3050", borderRadius: "10px", marginBottom: "1rem", overflow: "hidden" }}>
+      <div onClick={() => setOpen(o => !o)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.75rem 1.2rem", cursor: "pointer", userSelect: "none", background: open ? "#0d1f35" : "#0a1525" }}>
+        <span style={{ fontSize: "0.68rem", letterSpacing: "0.15em", textTransform: "uppercase", color: open ? "#22d3ee" : "#8090b0", fontWeight: "700" }}>{title}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
+          {!open && summary ? <span style={{ fontSize: "0.72rem", color: "#d0e0ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "190px" }}>{summary}</span> : null}
+          <span style={{ color: open ? "#22d3ee" : "#d0e0ec", fontSize: "0.9rem", flexShrink: 0, fontWeight: "700", display: "inline-block", transform: open ? "none" : "rotate(-90deg)" }}>{"▼"}</span>
+        </div>
+      </div>
+      {open ? <div style={{ padding: "0 1.2rem 1.2rem" }}>{children}</div> : null}
+    </div>
+  );
+}
+
+function CritScales({ vals, cx, cy, lx, ly, rx, ry, scalesColor, scalesLabel, balanced, ccAtCap, ccDiff, optimalCC, cdDiff, optimalCD, critMult, gearMult }) {
+  // Show how much each source contributes to total damage multiplier
+  const totalMult   = critMult * gearMult;
+  const critPct     = totalMult > 1 ? +((critMult  - 1) / (totalMult - 1) * 100).toFixed(0) : 50;
+  const stackPct    = totalMult > 1 ? +((gearMult  - 1) / (totalMult - 1) * 100).toFixed(0) : 50;
+  const showContrib = gearMult > 1.05; // only show breakdown when stacks are meaningful
+
+  return (
+    <div style={{ marginTop: "0.8rem", background: "#060f1c", borderRadius: "8px", padding: "0.8rem 0.4rem 0.6rem" }}>
+      <svg viewBox="0 0 200 105" width="100%" style={{ display: "block", overflow: "visible" }}>
+        <polygon points={`${cx},${cy+2} ${cx-11},${cy+20} ${cx+11},${cy+20}`} fill="#1e3a5f" />
+        <rect x={cx-18} y={cy+20} width={36} height={5} rx={2} fill="#1e3a5f" />
+        <line x1={lx} y1={ly} x2={rx} y2={ry} stroke="#b0c8d8" strokeWidth={4} strokeLinecap="round" />
+        <rect x={lx-22} y={ly-3} width={44} height={6} rx={2} fill="#22d3ee30" stroke="#22d3ee" strokeWidth={1.5} />
+        <rect x={rx-22} y={ry-3} width={44} height={6} rx={2} fill="#a78bfa30" stroke="#a78bfa" strokeWidth={1.5} />
+        <text x="28" y="16" textAnchor="middle" fill="#22d3ee" fontSize="13" fontFamily="'Rajdhani',sans-serif" fontWeight="800">CC</text>
+        <text x="28" y="30" textAnchor="middle" fill="#22d3ee" fontSize="12" fontFamily="'Rajdhani',sans-serif">{vals.cc}%</text>
+        <text x="172" y="16" textAnchor="middle" fill="#a78bfa" fontSize="13" fontFamily="'Rajdhani',sans-serif" fontWeight="800">CHD</text>
+        <text x="172" y="30" textAnchor="middle" fill="#a78bfa" fontSize="12" fontFamily="'Rajdhani',sans-serif">{vals.cd}%</text>
+        <text x={cx} y={cy+42} textAnchor="middle" fill={scalesColor} fontSize="11" fontFamily="'Barlow',sans-serif" fontWeight="700" letterSpacing="2">{scalesLabel}</text>
+      </svg>
+
+      {/* Damage source contribution bar — only when stacks active */}
+      {showContrib && (
+        <div style={{ padding: "0 0.6rem 0.5rem" }}>
+          <div style={{ fontSize: "0.70rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: "0.3rem" }}>
+            Damage multiplier source
+          </div>
+          <div style={{ display: "flex", borderRadius: "4px", overflow: "hidden", height: "10px", marginBottom: "0.3rem" }}>
+            <div style={{ width: `${critPct}%`, background: "#22d3ee", transition: "width 0.3s" }} />
+            <div style={{ flex: 1, background: "#4ade80" }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontSize: "0.65rem", color: "#22d3ee" }}>Crit {critPct}%</span>
+            <span style={{ fontSize: "0.65rem", color: "#4ade80" }}>Stacks {stackPct}%</span>
+          </div>
+          <div style={{ fontSize: "0.72rem", color: "#d0e0ec", marginTop: "0.3rem" }}>
+            CC/CD ratio stays optimal at CD = 2.5 × CC regardless of stacks
+          </div>
+        </div>
+      )}
+
+      {!balanced && (
+        <div style={{ borderTop: "1px solid #0d1a28", marginTop: "0.2rem", paddingTop: "0.6rem", paddingLeft: "0.6rem", paddingRight: "0.6rem" }}>
+          <div style={{ fontSize: "0.72rem", letterSpacing: "0.12em", textTransform: "uppercase", color: "#d0e0ec", marginBottom: "0.45rem" }}>To balance:</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
+            <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#22d3ee", flexShrink: 0 }} />
+            {ccAtCap
+              ? <span style={{ fontSize: "0.72rem", color: "#c0d4e4" }}>CC already at cap (60%) — can't add more</span>
+              : <span style={{ fontSize: "0.72rem", color: "#c8d8e8" }}>Add <span style={{ color: "#22d3ee", fontWeight: "700" }}>+{ccDiff}% CC</span> → {optimalCC}%</span>
+            }
+          </div>
+          <div style={{ fontSize: "0.65rem", color: "#d0e0ec", paddingLeft: "14px", marginBottom: "0.35rem" }}>— or —</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#a78bfa", flexShrink: 0 }} />
+            {cdDiff > 0
+              ? <span style={{ fontSize: "0.72rem", color: "#c8d8e8" }}>Reduce <span style={{ color: "#a78bfa", fontWeight: "700" }}>CHD by {cdDiff}%</span> → {optimalCD}%</span>
+              : <span style={{ fontSize: "0.72rem", color: "#c8d8e8" }}>Add <span style={{ color: "#a78bfa", fontWeight: "700" }}>+{Math.abs(cdDiff)}% CHD</span> → {optimalCD}%</span>
+            }
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [vals, setVals] = useState(DEFAULTS);
+  const [snapshotVals, setSnapshotVals] = useState(DEFAULTS);
+  const [openTooltip, setOpenTooltip]   = useState(null);
+  const [snapshotMods, setSnapshotMods] = useState(null); // frozen at Set Starting Point
+  const [saves, setSaves] = useState([]);
+  const [startingSet, setStartingSet] = useState(false);
+
+  // Gear set state
+  const [strikerOn, setStrikerOn]               = useState(false);
+  const [strikerBP, setStrikerBP]               = useState(false);
+  const [heartbreakerOn, setHeartbreakerOn]     = useState(false);
+  const [chestPiece, setChestPiece]             = useState('none');
+
+  const strikerPctPerStack  = strikerBP ? 0.9 : 0.65;
+  const strikerChest        = chestPiece === 'striker';
+  const heartbreakerChest   = chestPiece === 'heartbreaker';
+  const strikerMaxStacks    = strikerChest ? 200 : 100;
+  const hbMaxStacks         = heartbreakerChest ? 100 : 50;
+  const strikerTWD = strikerOn ? (strikerMaxStacks * strikerPctPerStack) : 0;
+  const hbAmp      = heartbreakerOn ? 1 + hbMaxStacks * 1.1 / 100 : 1;  // 1.1% per stack
+
+  // Modifiers state
+  const [mods, setMods]     = useState({ wd: 0, twd: 0, dta: 0, dth: 0, dtooc: 0 });
+  const [amps, setAmps]     = useState([0]);  // start with 1 amp slot
+  const [numpadTarget, setNumpadTarget] = useState(null);
+  const [frenzyMode, setFrenzyMode]     = useState('off');   // 'off' | 'normal' | 'perfect'
+  const [tinkererOn, setTinkererOn]     = useState(false);
+  const [talent1, setTalent1]           = useState('none');
+  const [talent2, setTalent2]           = useState('none');
+  const [expertise,  setExpertise]      = useState(0);        // 0–30%
+
+  // Frenzy: WD and RoF both scale with mag size
+  const frenzyStacks = frenzyMode === 'normal'  ? Math.floor(vals.mag / 10)
+                     : frenzyMode === 'perfect' ? Math.min(3, Math.floor(vals.mag / 8))
+                     : 0;
+  const frenzyBonus  = frenzyStacks * 3; // 3% per stack for both WD and RoF
+  const frenzyWD     = frenzyBonus;
+  const frenzyRoF    = frenzyBonus;
+  // Frenzy buff duration — warn if mag fire time exceeds it
+  const frenzyDuration = frenzyMode === 'normal' ? 9 : frenzyMode === 'perfect' ? 5 : 0;
+  const magFireTime    = vals.mag / (vals.rof * (1 + frenzyRoF/100) / 60);
+  const frenzyFullMag  = frenzyDuration > 0 && magFireTime <= frenzyDuration;
+
+  // Talent system (primary slot always, secondary only with Tinkerer)
+  const TALENTS = [
+    { id: 'none', label: 'None',          desc: '' },
+    { id: 'm',    label: 'Measured',      desc: 'Top half: +25% RoF, -15% WD | Bottom half: -18% RoF, +30% WD' },
+    { id: 'fl',   label: 'Flatline',      desc: '+15% AMP amplifier bucket' },
+    { id: 'fr',   label: 'Frenzy',        desc: '+3% WD and RoF per 10 bullets in mag, 9s on empty reload' },
+    { id: 'pfr',  label: 'Perf. Frenzy',  desc: '+3% WD and RoF per 8 bullets, max 3 stacks, 5s on empty reload' },
+  ];
+  const activeTalents     = tinkererOn ? [talent1, talent2] : [talent1];
+  const measuredOn        = activeTalents.includes('m');
+  const talentFLOn        = activeTalents.includes('fl');
+  const talentFrenzyOn    = activeTalents.includes('fr');
+  const talentPFrenzyOn   = activeTalents.includes('pfr');
+
+  const obliterateOn       = chestPiece === 'ob';
+  const spotterOn          = chestPiece === 'spotter';
+  const obliterateTWD      = obliterateOn ? 25 : 0;
+  const spotterAmp         = spotterOn ? 15 : 0;
+  const effectiveFlatlineAmp = (talentFLOn ? 15 : 0) + spotterAmp;
+
+  // If Frenzy is a talent, combine with the standalone Frenzy mode
+  const effectiveFrenzyMode = talentPFrenzyOn ? 'perfect' : talentFrenzyOn ? 'normal' : frenzyMode;
+  const effectiveFrenzyStacks = effectiveFrenzyMode === 'normal'  ? Math.floor(vals.mag / 10)
+                              : effectiveFrenzyMode === 'perfect' ? Math.min(3, Math.floor(vals.mag / 8))
+                              : frenzyStacks;
+  const effectiveFrenzyBonus = effectiveFrenzyStacks * 3;
+  const effectiveFrenzyWD  = effectiveFrenzyBonus;
+  const effectiveFrenzyRoF = effectiveFrenzyBonus;
+
+  const activeMods = { ...mods, amps, strikerTWD, hbAmp, frenzyWD: effectiveFrenzyWD, frenzyRoF: effectiveFrenzyRoF, flatlineAmp: effectiveFlatlineAmp, obliterateTWD, measuredOn, expertise };
+
+  // For CritScales — show contribution of crit vs gear stacks
+  const critMultForScales = 1 + (vals.cc / 100) * (vals.cd / 100);
+  const gearMultForScales = (1 + strikerTWD / 100) * hbAmp;
+
+  const set = (key) => (v) => {
+    setVals(prev => ({ ...prev, [key]: v }));
+  };
+
+  const reset = () => {
+    setVals(DEFAULTS); setSnapshotVals(DEFAULTS); setSnapshotMods(null); setStartingSet(false);
+    setStrikerOn(false); setStrikerBP(false);
+    setHeartbreakerOn(false);
+    setChestPiece('none');
+    setFrozenRamp(null); setMods({ wd: 0, twd: 0, dta: 0, dth: 0, dtooc: 0 });
+    setAmps([0]); setFrenzyMode('off'); setTinkererOn(false); setTalent1('none'); setTalent2('none'); setExpertise(0);
+  };
+
+  const current  = useMemo(() => calcStats(vals, activeMods),         [vals, JSON.stringify(activeMods)]);
+  const snapshot = useMemo(() => calcStats(snapshotVals, snapshotMods ?? activeMods), [snapshotVals, JSON.stringify(snapshotMods ?? activeMods)]);
+
+  const subFor     = (key) => null;
+  const threshold   = vals.cc * 2.5;
+  const shouldAddCD = vals.cd < threshold;
+  const ccDir = shouldAddCD ? "down" : (vals.cc < 60 ? "up" : null);
+  const cdDir = shouldAddCD ? "up" : "down";
+
+  const normalCC  = vals.cc;
+  const normalCD  = vals.cd / 2.5;
+  const diff      = normalCC - normalCD;
+  const tiltDeg   = Math.max(-28, Math.min(28, (diff / 70) * 28));
+  const balanced  = Math.abs(diff) < 3;
+
+  const scalesColor = balanced ? "#4ade80" : Math.abs(diff) < 15 ? "#facc15" : "#f87171";
+  const scalesLabel = balanced ? "BALANCED" : diff > 0 ? "ADD CHD" : "ADD CC";
+
+  const optimalCD  = +(vals.cc * 2.5).toFixed(1);
+  const optimalCC  = +Math.min(60, normalCD).toFixed(1);
+  const cdDiff     = +(vals.cd - optimalCD).toFixed(1);
+  const ccDiff     = +(optimalCC - vals.cc).toFixed(1);
+  const ccAtCap    = vals.cc >= 60;
+
+  const dirFor = (key) => key === "cc" ? ccDir : key === "cd" ? cdDir : undefined;
+
+  const sliderContrib = (key) => {
+    if (!startingSet) return null;
+    if (vals[key] === snapshotVals[key]) return null;
+    // Compare: snapshot vals with this key changed to current value vs snapshot
+    const changed = calcStats({ ...snapshotVals, [key]: vals[key] }, snapshotMods ?? activeMods);
+    const affectsBurst   = ["dmg","cc","cd","hsd","rof"].includes(key);
+    const affectsSustain = ["dmg","cc","cd","hsd","baseReload","mag","rof"].includes(key);
+    const burstPct   = affectsBurst   ? (changed.burstDPS    / snapshot.burstDPS    - 1) * 100 : null;
+    const sustainPct = affectsSustain ? (changed.sustainedDPS / snapshot.sustainedDPS - 1) * 100 : null;
+    return { burstPct, sustainPct };
+  };
+
+  const contribFor = (key) => sliderContrib(key);
+
+  const [frozenRamp, setFrozenRamp] = useState(null);
+  const [chartZoom, setChartZoom] = useState(0.15);
+  const [chartClearFlag, setChartClearFlag] = useState(0);
+  const [chartFitZoom, setChartFitZoom] = useState(0.15);
+
+  const simResult = useMemo(() => {
+    if (!strikerOn && !heartbreakerOn) return null;
+    return simulateMagCycle({ vals, strikerOn, strikerBP, heartbreakerOn, chestPiece, mods: activeMods });
+  }, [vals, strikerOn, strikerBP, heartbreakerOn, chestPiece, JSON.stringify(activeMods)]);
+
+  const totalBurstPct   = snapshot.burstDPS    > 0 ? (current.burstDPS    / snapshot.burstDPS    - 1) * 100 : 0;
+  const totalSustainPct = snapshot.sustainedDPS > 0 ? (current.sustainedDPS / snapshot.sustainedDPS - 1) * 100 : 0;
+
+  const cx = 100, cy = 52, beamLen = 75;
+  const rad = tiltDeg * Math.PI / 180;
+  const lx = cx - Math.cos(rad) * beamLen, ly = cy - Math.sin(rad) * beamLen;
+  const rx = cx + Math.cos(rad) * beamLen, ry = cy + Math.sin(rad) * beamLen;
+
+  // Section summaries
+  const fmt = v => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(0)}k` : String(Math.round(v));
+  const talentSummary = activeTalents.filter(t => t !== 'none').join('+').toUpperCase() || '';
+  const gearSummary = [
+    strikerOn && `Striker${strikerBP ? " +BP" : ""}${strikerChest ? " +Chest" : ""} (${strikerPctPerStack}%/stack, ${strikerMaxStacks} max)`,
+    heartbreakerOn && `HB ${heartbreakerChest ? "Chest" : "Base"}`,
+    !strikerOn && !heartbreakerOn && "No gear set",
+    tinkererOn && talentSummary && `Tinkerer: ${talentSummary}`,
+    !tinkererOn && talentSummary && `Talent: ${talentSummary}`,
+  ].filter(Boolean).join(" · ");
+  const modsSummary = [
+    mods.wd    > 0 && `WD ${mods.wd}%`,
+    mods.twd   > 0 && `TWD ${mods.twd}%`,
+    mods.dta   > 0 && `DtA ${mods.dta}%`,
+    mods.dth   > 0 && `DtH ${mods.dth}%`,
+    mods.dtooc > 0 && `OoC ${mods.dtooc}%`,
+    amps.some(a => a > 0) && `AMP ${amps.filter(a=>a>0).join("/")}%`,
+    frenzyMode !== 'off' && `Frenzy ${frenzyBonus}%`,
+    chestPiece !== 'none' && `Chest: ${chestPiece}`,
+    tinkererOn && activeTalents.filter(t => t !== 'none').length > 0 && `Tinkerer: ${activeTalents.filter(t => t !== 'none').join('+')}`,
+    !tinkererOn && activeTalents.filter(t => t !== 'none').length > 0 && `Talent: ${activeTalents.filter(t => t !== 'none').join('+')}`,
+
+    expertise  > 0 && `Exp ${expertise}%`,
+  ].filter(Boolean).join(" · ") || "None";
+  const statsSummary = `DMG ${vals.dmg.toLocaleString()} · CC ${vals.cc}% · CHD ${vals.cd}% · ${vals.rof}RPM · Mag ${vals.mag} · Reload ${vals.baseReload}s`;
+  const resultsSummary = `Burst ${fmt(current.burstDPS)} · Sust ${fmt(current.sustainedDPS)}`;
+  const savesSummary = saves.length > 0 ? `${saves.length} saved` : "None";
+
+  const saveEntry = () => {
+    const entry = {
+      timestamp: new Date().toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }),
+      settings: { ...vals },
+      startBurst:      Math.round(snapshot.burstDPS),
+      currentBurst:    Math.round(current.burstDPS),
+      currentSustain:  Math.round(current.sustainedDPS),
+      burstImproved:   current.burstDPS >= snapshot.burstDPS,
+      sustainImproved: current.sustainedDPS >= snapshot.sustainedDPS,
+    };
+    setSaves(prev => [entry, ...prev]);
+  };
+
+  const clearSaves = () => setSaves([]);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#070e1a", fontFamily: "'Barlow', sans-serif", color: "#c8d8e8" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@700;800&family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@700;800&display=swap');
+        * { box-sizing: border-box; }
+        body { touch-action: pan-y; }
+        .chart-scroll { touch-action: pan-x; }
+        .chart-pinch { touch-action: none; }
+        .section { scroll-margin-top: 150px; }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ background: "linear-gradient(180deg,#0d1f35 0%,#070e1a 100%)", borderBottom: "1px solid #1a3050", padding: "1.2rem 1.4rem 1rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.15rem" }}>
+          <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: "#f97316", boxShadow: "0 0 7px #f97316" }} />
+          <span style={{ fontSize: "0.70rem", letterSpacing: "0.2em", textTransform: "uppercase", color: "#f97316" }}>SHD TECH</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+          <h1 style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: "1.7rem", fontWeight: 800, color: "#e8f0f8", margin: 0, lineHeight: 1 }}>
+            DPS <span style={{ color: "#f97316" }}>CALCULATOR</span>
+          </h1>
+          <PressButton onClick={reset} style={{
+            background: "#1a2535", border: "1px solid #2a3f55", borderRadius: "6px",
+            color: "#d0e0ec", fontSize: "0.65rem", fontWeight: "700", letterSpacing: "0.1em",
+            textTransform: "uppercase", padding: "0.35rem 0.7rem", cursor: "pointer"
+          }}>
+            ↺ Reset
+          </PressButton>
+        </div>
+      </div>
+
+      {/* Sticky Nav */}
+      <div style={{
+        position: "sticky", top: 0, zIndex: 100,
+        background: "#0a1525ee", backdropFilter: "blur(8px)",
+        borderBottom: "1px solid #1a3050",
+        display: "flex", overflowX: "auto", padding: "0.4rem 0.6rem", gap: "0.4rem",
+      }}>
+        {[
+          { label: "🎯 Results", id: "section-results" },
+          { label: "⚙ Gear",    id: "section-gear"    },
+          { label: "🔢 Mods",   id: "section-mods"    },
+          { label: "📊 Stats",  id: "section-stats"   },
+          ...(simResult ? [{ label: "📈 Chart", id: "section-chart" }] : []),
+          { label: `💾 Saves${saves.length ? ` (${saves.length})` : ""}`, id: "section-saves", dim: saves.length === 0 },
+        ].map(({ label, id, dim }) => (
+          <PressButton key={id}
+            onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            style={{
+              flexShrink: 0, padding: "0.3rem 0.7rem", borderRadius: "20px",
+              border: "1px solid " + (dim ? "#1a3050" : "#22d3ee40"),
+              background: dim ? "transparent" : "#22d3ee12",
+              color: dim ? "#d0e0ec" : "#22d3ee",
+              fontSize: "0.7rem", fontWeight: "700", letterSpacing: "0.05em",
+              cursor: "pointer", whiteSpace: "nowrap",
+            }}>
+            {label}
+          </PressButton>
+        ))}
+      </div>
+
+      {/* Sticky starting point button + stats bar */}
+      <div style={{
+        position: "sticky", top: "48px", zIndex: 99,
+        background: "#070e1acc", backdropFilter: "blur(8px)",
+        borderBottom: "1px solid " + (startingSet ? "#22d3ee30" : "#1a3050"),
+        padding: "0.4rem 0.8rem 0.5rem",
+      }}>
+        <PressButton
+          onClick={() => {
+            setSnapshotVals({ ...vals });
+            setSnapshotMods({ ...activeMods });
+            setStartingSet(true);
+            if (simResult) setFrozenRamp(simResult.points);
+          }}
+          style={{
+            width: "100%", padding: "0.45rem", borderRadius: "8px",
+            background: startingSet ? "#22d3ee18" : "#0a1525",
+            border: "1px solid " + (startingSet ? "#22d3ee50" : "#1a3050"),
+            color: startingSet ? "#22d3ee" : "#d0e0ec",
+            fontSize: "0.68rem", fontWeight: "700", letterSpacing: "0.08em",
+            textTransform: "uppercase", cursor: "pointer",
+          }}
+        >
+          {startingSet ? "📍 Starting Point Set — Tap to Update" : "📍 Set Current As Starting Point"}
+        </PressButton>
+
+        {/* Always-visible stats bar */}
+        <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.45rem" }}>
+          {[
+            { label: strikerOn || heartbreakerOn ? "Peak Burst DPS" : "Burst DPS",     val: current.burstDPS,     color: "#22d3ee" },
+            { label: strikerOn || heartbreakerOn ? "Peak Sustained" : "Sustained DPS", val: current.sustainedDPS, color: "#fb923c" },
+          ].map(({ label, val, color }) => (
+            <div key={label} style={{ flex: 1, background: "#0a1525cc", borderRadius: "6px", padding: "0.3rem 0.5rem", border: "1px solid " + color + "25" }}>
+              <div style={{ fontSize: "0.68rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
+              <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "0.95rem", fontWeight: "800", color }}>
+                {val >= 1000000 ? `${(val/1000000).toFixed(2)}M` : val >= 1000 ? `${(val/1000).toFixed(1)}k` : Math.round(val)}
+              </div>
+            </div>
+          ))}
+          {simResult && (() => {
+            const pct = simResult.startDPS > 0 ? Math.round((simResult.peakDPS / simResult.startDPS - 1) * 100) : 0;
+            const fmtN = v => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(0)}k` : Math.round(v);
+            return (
+              <div style={{ flex: 1.3, background: "#0a1525cc", borderRadius: "6px", padding: "0.3rem 0.5rem", border: "1px solid #4ade8025" }}>
+                <div style={{ fontSize: "0.68rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.08em" }}>Start → Peak DPS</div>
+                <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "0.85rem", fontWeight: "800", color: "#4ade80", lineHeight: 1.1 }}>
+                  {fmtN(simResult.startDPS)} → {fmtN(simResult.peakDPS)}
+                </div>
+                <div style={{ fontSize: "0.70rem", color: "#4ade80aa", marginTop: "0.05rem" }}>+{pct}% from stacks</div>
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* Modifier numpad overlay */}
+      {numpadTarget && (
+        <NumPad
+          label={numpadTarget.label}
+          value={numpadTarget.value}
+          color={numpadTarget.color}
+          allowDecimal={true}
+          onConfirm={val => {
+            if (numpadTarget.isAmp) {
+              setAmps(a => a.map((v, i) => i === numpadTarget.ampIndex ? Math.max(0, val) : v));
+            } else if (numpadTarget.isExpertise) {
+              setExpertise(Math.min(30, Math.max(0, val)));
+            } else {
+              setMods(m => ({ ...m, [numpadTarget.key]: Math.max(0, val) }));
+            }
+          }}
+          onClose={() => setNumpadTarget(null)}
+        />
+      )}
+
+      <div style={{ padding: "1rem 0.8rem", maxWidth: "460px", margin: "0 auto", width: "100%", boxSizing: "border-box", overflowX: "hidden" }}>
+
+        {/* Gear Sets */}
+        <Section id="section-gear" title="Gear Sets" summary={gearSummary}>
+
+          {/* Striker */}
+          <div style={{ marginBottom: "0.8rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: strikerOn ? "0.5rem" : 0 }}>
+              <PressButton onClick={() => { setStrikerOn(p => !p); setHeartbreakerOn(false); }} style={{
+                padding: "0.2rem 0.6rem", borderRadius: "6px", fontSize: "0.65rem", fontWeight: "700", cursor: "pointer",
+                border: "1px solid " + (strikerOn ? "#f97316" : "#2a3a50"),
+                background: strikerOn ? "#f9731620" : "transparent",
+                color: strikerOn ? "#f97316" : "#c0d4e4", letterSpacing: "0.08em"
+              }}>{strikerOn ? "ON" : "OFF"}</PressButton>
+              <span style={{ fontSize: "0.72rem", color: strikerOn ? "#e8f0f8" : "#c0d4e4", fontWeight: "600" }}>Striker's Gamble</span>
+              <Tooltip id="tt-striker" text="4-piece set. Each weapon hit adds stacks of TWD. Base: 0.65%/stack, max 100. Backpack (Risk Mgmt): 0.9%/stack. Chest (Press the Advantage): max 200 stacks. Stacks decay when not firing." openId={openTooltip} setOpenId={setOpenTooltip} />
+            </div>
+            {strikerOn && (
+              <div style={{ paddingLeft: "0.2rem" }}>
+                <div style={{ fontSize: "0.72rem", color: "#d0e0ec", marginBottom: "0.35rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>Talents</div>
+                <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.3rem" }}>
+                  <PressButton onClick={() => setStrikerBP(b => !b)} style={{ flex: 1, padding:"0.25rem 0.4rem", borderRadius:"6px", fontSize:"0.65rem", fontWeight:"700", cursor:"pointer", border: "1px solid " + (strikerBP ? "#f97316" : "#2a3a50"), background: strikerBP ? "#f9731620" : "transparent", color: strikerBP ? "#f97316" : "#c0d4e4" }}>
+                    {strikerBP ? "✓" : "+"} Backpack — Risk Mgmt (0.9%/stack)
+                  </PressButton>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.3rem" }}>
+                  <PressButton onClick={() => setChestPiece(c => c === 'striker' ? 'none' : 'striker')} style={{ flex: 1, padding:"0.25rem 0.4rem", borderRadius:"6px", fontSize:"0.65rem", fontWeight:"700", cursor:"pointer", border: "1px solid " + (strikerChest ? "#f97316" : "#2a3a50"), background: strikerChest ? "#f9731620" : "transparent", color: strikerChest ? "#f97316" : "#c0d4e4" }}>
+                    {strikerChest ? "✓" : "+"} Chest — Press the Advantage (200 stacks)
+                  </PressButton>
+                  {(() => {
+                    const withDPS    = calcStats(vals, { ...activeMods, strikerTWD: 200 * strikerPctPerStack }).burstDPS;
+                    const withoutDPS = calcStats(vals, { ...activeMods, strikerTWD: 100 * strikerPctPerStack }).burstDPS;
+                    const pct = withoutDPS > 0 ? +((withDPS / withoutDPS - 1) * 100).toFixed(1) : null;
+                    return pct !== null ? (
+                      <span style={{ fontSize: "0.65rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: strikerChest ? "#4ade80" : "#a0b8cc", flexShrink: 0 }}>
+                        {strikerChest ? `active · +${pct}% vs 100` : `+${pct}% if equipped`}
+                      </span>
+                    ) : null;
+                  })()}
+                </div>
+                <div style={{ fontSize: "0.72rem", color: "#d0e0ec", marginTop: "0.35rem" }}>
+                  {strikerPctPerStack}%/stack · max {strikerMaxStacks} stacks · peak TWD +{(strikerMaxStacks * strikerPctPerStack).toFixed(0)}%
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Heartbreaker */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: heartbreakerOn ? "0.5rem" : 0 }}>
+              <PressButton onClick={() => { setHeartbreakerOn(p => !p); setStrikerOn(false); }} style={{
+                padding: "0.2rem 0.6rem", borderRadius: "6px", fontSize: "0.65rem", fontWeight: "700", cursor: "pointer",
+                border: "1px solid " + (heartbreakerOn ? "#f472b6" : "#2a3a50"),
+                background: heartbreakerOn ? "#f472b620" : "transparent",
+                color: heartbreakerOn ? "#f472b6" : "#c0d4e4", letterSpacing: "0.08em"
+              }}>{heartbreakerOn ? "ON" : "OFF"}</PressButton>
+              <span style={{ fontSize: "0.72rem", color: heartbreakerOn ? "#e8f0f8" : "#c0d4e4", fontWeight: "600" }}>Heartbreaker</span>
+              <Tooltip id="tt-hb" text="4-piece set. Each hit on a pulsed enemy adds 1.1% amplified damage per stack. Base max: 50 stacks (+55% AMP). Chest (Max BPM): 100 stacks (+110% AMP). Amplifier bucket — multiplicative with everything." openId={openTooltip} setOpenId={setOpenTooltip} />
+            </div>
+            {heartbreakerOn && (
+              <div style={{ paddingLeft: "0.2rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.3rem" }}>
+                  <PressButton onClick={() => setChestPiece(c => c === 'heartbreaker' ? 'none' : 'heartbreaker')} style={{ flex: 1, padding:"0.25rem 0.4rem", borderRadius:"6px", fontSize:"0.65rem", fontWeight:"700", cursor:"pointer", border: "1px solid " + (heartbreakerChest ? "#f472b6" : "#2a3a50"), background: heartbreakerChest ? "#f472b620" : "transparent", color: heartbreakerChest ? "#f472b6" : "#c0d4e4" }}>
+                    {heartbreakerChest ? "✓" : "+"} Chest — Max BPM (100 stacks)
+                  </PressButton>
+                  {(() => {
+                    const withDPS    = calcStats(vals, { ...activeMods, hbAmp: 1 + 100 * 1.1 / 100 }).burstDPS;
+                    const withoutDPS = calcStats(vals, { ...activeMods, hbAmp: 1 + 50  * 1.1 / 100 }).burstDPS;
+                    const pct = withoutDPS > 0 ? +((withDPS / withoutDPS - 1) * 100).toFixed(1) : null;
+                    return pct !== null ? (
+                      <span style={{ fontSize: "0.65rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: heartbreakerChest ? "#4ade80" : "#a0b8cc", flexShrink: 0 }}>
+                        {heartbreakerChest ? `active · +${pct}% vs base` : `+${pct}% if equipped`}
+                      </span>
+                    ) : null;
+                  })()}
+                </div>
+                <div style={{ fontSize: "0.72rem", color: "#d0e0ec", marginTop: "0.3rem" }}>
+                  Max {heartbreakerChest ? 100 : 50} stacks · 1.1%/stack · peak AMP +{(hbMaxStacks * 1.1).toFixed(0)}%
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Tinkerer Mask + Talent Slots */}
+          <div style={{ marginTop: "0.8rem", paddingTop: "0.8rem", borderTop: "1px solid #0d1a28" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.5rem" }}>
+              <PressButton onClick={() => setTinkererOn(t => !t)} style={{
+                padding: "0.2rem 0.6rem", borderRadius: "6px", fontSize: "0.65rem", fontWeight: "700", cursor: "pointer",
+                border: "1px solid " + (tinkererOn ? "#e2c97e" : "#2a3a50"),
+                background: tinkererOn ? "#e2c97e20" : "transparent",
+                color: tinkererOn ? "#e2c97e" : "#a0b8c8",
+              }}>{tinkererOn ? "ON" : "OFF"}</PressButton>
+              <span style={{ fontSize: "0.72rem", color: tinkererOn ? "#e8f0f8" : "#a0b8c8", fontWeight: "600" }}>Tinkerer Mask</span>
+              {tinkererOn && <span style={{ fontSize: "0.65rem", color: "#d0e0ec" }}>— 2 talents on primary</span>}
+            </div>
+
+            {[
+              { slot: 1, val: talent1, setter: setTalent1, label: tinkererOn ? "Talent 1 (primary weapon)" : "Weapon Talent" },
+              ...(tinkererOn ? [{ slot: 2, val: talent2, setter: setTalent2, label: "Talent 2 (secondary weapon, via Tinkerer)" }] : []),
+            ].map(({ slot, val, setter, label }) => {
+              // Calculate DPS impact for each talent vs no talent in this slot
+              const baseModsNoTalent = { ...activeMods,
+                frenzyWD: slot === 1 ? (activeTalents[1] === 'fr' || activeTalents[1] === 'pfr' ? effectiveFrenzyWD : (frenzyMode !== 'off' ? frenzyStacks*3 : 0)) : (activeTalents[0] === 'fr' || activeTalents[0] === 'pfr' ? effectiveFrenzyWD : (frenzyMode !== 'off' ? frenzyStacks*3 : 0)),
+                measuredOn: slot === 1 ? activeTalents[1] === 'm' : activeTalents[0] === 'm',
+              };
+              const talentImpact = (tid) => {
+                if (tid === 'none') return null;
+                const withTalent = { ...baseModsNoTalent,
+                  frenzyWD:  (tid === 'fr' || tid === 'pfr') ? (tid === 'fr' ? Math.floor(vals.mag/10)*3 : Math.min(3,Math.floor(vals.mag/8))*3) + (baseModsNoTalent.frenzyWD) : baseModsNoTalent.frenzyWD,
+                  frenzyRoF: (tid === 'fr' || tid === 'pfr') ? (tid === 'fr' ? Math.floor(vals.mag/10)*3 : Math.min(3,Math.floor(vals.mag/8))*3) + (baseModsNoTalent.frenzyRoF) : baseModsNoTalent.frenzyRoF,
+                  measuredOn: tid === 'm' ? true : baseModsNoTalent.measuredOn,
+                  flatlineAmp: tid === 'fl' ? 15 : baseModsNoTalent.flatlineAmp,
+                };
+                const without = calcStats(vals, { ...baseModsNoTalent });
+                const with_   = calcStats(vals, withTalent);
+                if (without.burstDPS === 0) return null;
+                return +((with_.burstDPS / without.burstDPS - 1) * 100).toFixed(1);
+              };
+              return (
+                <div key={slot} style={{ marginBottom: "0.6rem" }}>
+                  <div style={{ fontSize: "0.65rem", color: "#d0e0ec", marginBottom: "0.3rem" }}>{label}</div>
+                  <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+                    {TALENTS.map(t => {
+                      const impact = t.id !== 'none' ? talentImpact(t.id) : null;
+                      return (
+                        <div key={t.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.15rem" }}>
+                          <PressButton onClick={() => setter(t.id)} style={{
+                            padding: "0.22rem 0.55rem", borderRadius: "6px", fontSize: "0.65rem", fontWeight: "700", cursor: "pointer",
+                            border: "1px solid " + (val === t.id ? "#e2c97e" : "#2a3a50"),
+                            background: val === t.id ? "#e2c97e20" : "transparent",
+                            color: val === t.id ? "#e2c97e" : "#a0b8c8",
+                          }}>{t.label}</PressButton>
+                          {impact !== null && (
+                            <span style={{ fontSize: "0.6rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: impact >= 0 ? "#4ade80" : "#f87171" }}>
+                              {impact >= 0 ? "+" : ""}{impact}%
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {val !== 'none' && (
+                    <div style={{ fontSize: "0.65rem", color: "#d0e0ec", marginTop: "0.25rem", paddingLeft: "0.2rem" }}>
+                      {TALENTS.find(t => t.id === val).desc}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Chest Talents — Obliterate and Spotter, mutually exclusive with gear set chests */}
+          <div style={{ marginTop: "0.8rem", paddingTop: "0.8rem", borderTop: "1px solid #0d1a28" }}>
+            <div style={{ fontSize: "0.65rem", letterSpacing: "0.1em", textTransform: "uppercase", color: "#d0e0ec", marginBottom: "0.5rem" }}>Chest Talent</div>
+            <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+              {[
+                { id: 'ob',      label: 'Obliterate', desc: '+1% TWD per crit hit, max 25 stacks — TWD bucket' },
+                { id: 'spotter', label: 'Spotter',    desc: '+15% AMP to pulsed enemies — amplifier bucket' },
+              ].map(ct => {
+                const active = chestPiece === ct.id;
+                const modsWith    = ct.id === 'ob' ? { ...activeMods, obliterateTWD: 25 } : { ...activeMods, flatlineAmp: (activeMods.flatlineAmp||0) + 15 };
+                const modsWithout = ct.id === 'ob' ? { ...activeMods, obliterateTWD: 0  } : activeMods;
+                const pct = modsWithout.burstDPS > 0 ? null : (() => {
+                  const w = calcStats(vals, modsWith).burstDPS;
+                  const wo = calcStats(vals, modsWithout).burstDPS;
+                  return wo > 0 ? +((w / wo - 1) * 100).toFixed(1) : null;
+                })();
+                const impact = (() => {
+                  const w = calcStats(vals, modsWith).burstDPS;
+                  const wo = calcStats(vals, modsWithout).burstDPS;
+                  return wo > 0 ? +((w / wo - 1) * 100).toFixed(1) : null;
+                })();
+                return (
+                  <div key={ct.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.15rem" }}>
+                    <PressButton onClick={() => setChestPiece(p => p === ct.id ? 'none' : ct.id)} style={{
+                      padding: "0.25rem 0.6rem", borderRadius: "6px", fontSize: "0.68rem", fontWeight: "700", cursor: "pointer",
+                      border: "1px solid " + (active ? "#fb923c" : "#2a3a50"),
+                      background: active ? "#fb923c20" : "transparent",
+                      color: active ? "#fb923c" : "#d0e0ec",
+                    }}>{ct.label}</PressButton>
+                    {impact !== null && (
+                      <span style={{ fontSize: "0.62rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: "#4ade80" }}>
+                        +{impact}%
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {(chestPiece === 'ob' || chestPiece === 'spotter') && (
+              <div style={{ fontSize: "0.65rem", color: "#d0e0ec", marginTop: "0.3rem" }}>
+                {chestPiece === 'ob' ? '+1% TWD per crit hit, max 25 stacks — TWD bucket' : '+15% AMP to pulsed enemies — amplifier bucket'}
+              </div>
+            )}
+          </div>
+
+
+        </Section>
+
+        {/* Modifiers */}
+        <Section id="section-mods" title="Damage Modifiers" summary={modsSummary}>
+
+          {/* Expertise row */}
+          <div style={{ marginBottom: "1.1rem", paddingBottom: "1rem", borderBottom: "1px solid #0d1a28" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.2rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span style={{ fontSize: "0.7rem", letterSpacing: "0.1em", textTransform: "uppercase", color: "#d0e0ec" }}>Expertise %</span>
+                <span style={{ fontSize: "0.70rem", color: "#d0e0ec" }}>base dmg</span>
+                <Tooltip id="tt-exp" text="Expertise multiplies your raw base damage BEFORE all other buckets (WD, TWD, crit, amps). Max +30% at Grade 30. Every other multiplier then scales off this boosted base, making it very efficient." openId={openTooltip} setOpenId={setOpenTooltip} />
+                {(() => {
+                  const withoutDPS = calcStats(vals, { ...activeMods, expertise: 0 }).burstDPS;
+                  const pct = expertise > 0 && withoutDPS > 0 ? +((current.burstDPS / withoutDPS - 1) * 100).toFixed(1) : null;
+                  return pct !== null ? <span style={{ fontSize: "0.68rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: "#4ade80" }}>+{pct}% DPS</span> : null;
+                })()}
+              </div>
+              <span
+                onClick={() => setNumpadTarget({ key: 'expertise', label: 'Expertise %', value: expertise, color: "#f97316", isExpertise: true })}
+                style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "1rem", fontWeight: "700", color: expertise > 0 ? "#f97316" : "#d0e0ec", cursor: "pointer", borderBottom: "1px dashed " + (expertise > 0 ? "#f9731660" : "#2a3a50"), paddingBottom: "1px" }}
+              >
+                {expertise}%
+              </span>
+            </div>
+            {/* Slider 0-30 */}
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
+              <PressButton onClick={() => setExpertise(e => Math.max(0, e - 1))} style={{ width:"36px", height:"36px", borderRadius:"8px", border:"1px solid #f9731640", background:"#f9731612", color:"#f97316", fontSize:"1.2rem", fontWeight:"700", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>−</PressButton>
+              <div style={{ flex: 1, position: "relative", height: "5px", borderRadius: "3px", background: "#1a2535" }}>
+                <div style={{ position: "absolute", left: 0, top: 0, height: "100%", borderRadius: "3px", width: `${(expertise / 30) * 100}%`, background: "#f97316" }} />
+                <input type="range" min={0} max={30} step={1} value={expertise} onChange={e => setExpertise(+e.target.value)}
+                  style={{ position:"absolute", top:"50%", left:0, width:"100%", transform:"translateY(-50%)", opacity:0, cursor:"pointer", height:"20px", margin:0, touchAction:"pan-y" }} />
+              </div>
+              <PressButton onClick={() => setExpertise(e => Math.min(30, e + 1))} style={{ width:"36px", height:"36px", borderRadius:"8px", border:"1px solid #f9731640", background:"#f9731612", color:"#f97316", fontSize:"1.2rem", fontWeight:"700", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>+</PressButton>
+            </div>
+            {expertise > 0 && (
+              <div style={{ fontSize: "0.65rem", color: "#d0e0ec", display: "flex", gap: "1rem" }}>
+                <span>Base: <span style={{ color: "#e8f0f8", fontFamily: "'Rajdhani',sans-serif", fontWeight: "700" }}>{vals.dmg.toLocaleString()}</span></span>
+                <span>With expertise: <span style={{ color: "#f97316", fontFamily: "'Rajdhani',sans-serif", fontWeight: "700" }}>{Math.round(vals.dmg * (1 + expertise/100)).toLocaleString()}</span></span>
+              </div>
+            )}
+            <div style={{ fontSize: "0.72rem", color: "#d0e0ec", marginTop: "0.25rem" }}>
+              Multiplies base dmg before all other buckets · max +30% at Grade 30 · enter base dmg from inventory then add expertise
+            </div>
+          </div>
+
+
+          {/* Manual modifier inputs */}
+          {[
+            { key: "wd",    label: "Weapon Damage %",        bucket: "WD",  hint: "AR/LMG/SMG type + all weapon dmg attributes (additive)", tip: "WD bucket: weapon type bonuses + all weapons damage on gear. Already included in your inventory damage number. Additive with other WD sources. Diminishing returns as this bucket grows.",        color: "#f97316" },
+            { key: "twd",   label: "Total Weapon Damage %",  bucket: "TWD", hint: "Talents: Vigilance, Wicked, Concussion etc. (additive with gear set TWD)", tip: "TWD bucket is separate from WD. Includes Vigilance, Wicked, Concussion, Unhinged talents. Striker stacks also go here. Additive within the bucket so diminishing returns apply.", color: "#fb923c" },
+            { key: "dta",   label: "Damage to Armor %",      bucket: "DtA", tip: "Applies vs armoured enemies. Shares a bucket with DtH so they add together — each extra % is worth less when both are stacked. Best when enemies still have armor.", hint: `Vs armoured enemies — adds with DtH within their bucket${mods.dth > 0 ? ` · combined bucket: ${mods.dta + mods.dth}%` : ""}`,       color: "#22d3ee" },
+            { key: "dth",   label: "Damage to Health %",     bucket: "DtH", tip: "Applies vs stripped/unarmoured enemies. Shares a bucket with DtA so diminishing returns apply when both are high. Best when armor is already stripped.", hint: `Vs unarmoured enemies — adds with DtA within their bucket${mods.dta > 0 ? ` · combined bucket: ${mods.dta + mods.dth}%` : ""}`,     color: "#38bdf8" },
+            { key: "dtooc", label: "Out of Cover Damage %",  bucket: "OoC", tip: "Its own multiplicative bucket — no diminishing returns with other buckets. LMGs have this natively. Banshee gear set provides it. Very efficient if enemy is out of cover.", hint: "LMG native, Banshee set — own multiplicative bucket",           color: "#a78bfa" },
+          ].map(({ key, label, bucket, hint, tip, color }) => {
+            const v = mods[key];
+            // Per-1% marginal DPS gain: what does adding 1 more % to this bucket give right now
+            const baseWith1   = calcStats(vals, { ...activeMods, [key]: v + 1 }).burstDPS;
+            const pctPer1     = current.burstDPS > 0 ? +((baseWith1 / current.burstDPS - 1) * 100).toFixed(2) : null;
+            const pctLabel    = pctPer1 !== null ? `+${pctPer1}% per 1%` : null;
+            return (
+              <div key={key} style={{ marginBottom: "0.9rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.15rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span style={{ fontSize: "0.78rem", fontWeight: "700", color, fontFamily: "'Barlow',sans-serif" }}>{label}</span>
+                    <span style={{ fontSize: "0.65rem", color: "#d0e0ec", fontFamily: "'Barlow Condensed',sans-serif", letterSpacing: "0.08em" }}>{bucket}</span>
+                    {tip && <Tooltip id={"tt-" + key} text={tip} openId={openTooltip} setOpenId={setOpenTooltip} />}
+                    {pctPer1 !== null && (
+                      <span style={{ fontSize: "0.68rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: v > 0 ? "#4ade80" : "#5a7a9a" }}>
+                        {pctLabel}
+                      </span>
+                    )}
+                  </div>
+                  <span
+                    onClick={() => setNumpadTarget({ key, label, value: mods[key], color, allowDecimal: true })}
+                    style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "1.1rem", fontWeight: "800", color: v > 0 ? color : "#d0e0ec", cursor: "pointer", borderBottom: "1px dashed " + (v > 0 ? color + "60" : "#2a3a50"), paddingBottom: "1px", minWidth: "40px", textAlign: "right" }}
+                  >
+                    {v}%
+                  </span>
+                </div>
+                <div style={{ fontSize: "0.68rem", color: "#d0e0ec", lineHeight: 1.4 }}>{hint}</div>
+              </div>
+            );
+          })}
+          {/* Dynamic Amplifier slots */}
+          {amps.map((val, i) => {
+            const ampsWith1   = amps.map((a, j) => j === i ? val + 1 : a);
+            const ampsBase    = amps.map((a, j) => j === i ? val : a);
+            const baseDPS     = calcStats(vals, { ...activeMods, amps: ampsBase }).burstDPS;
+            const with1DPS    = calcStats(vals, { ...activeMods, amps: ampsWith1 }).burstDPS;
+            const pct         = baseDPS > 0 ? +((with1DPS / baseDPS - 1) * 100).toFixed(2) : null;
+            const pctLabel    = pct !== null ? '+' + pct + '% DPS per 1%' : null;
+            return (
+              <div key={i} style={{ marginBottom: "0.9rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.15rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span style={{ fontSize: "0.78rem", fontWeight: "700", color: "#4ade80", fontFamily: "'Barlow',sans-serif" }}>Amplifier {i + 1} %</span>
+                    <span style={{ fontSize: "0.65rem", color: "#d0e0ec", fontFamily: "'Barlow Condensed',sans-serif", letterSpacing: "0.08em" }}>AMP</span>
+                    {i === 0 && <Tooltip id="tt-amp" text="Each amplifier is its own multiplicative bucket — no diminishing returns. Examples: Spotter, Ranger, Glass Cannon, Sadist. Each multiplies your full damage independently of all other amps." openId={openTooltip} setOpenId={setOpenTooltip} />}
+                    {pctLabel !== null && (
+                      <span style={{ fontSize: "0.68rem", fontWeight: "700", fontFamily: "'Rajdhani',sans-serif", color: val > 0 ? "#4ade80" : "#5a7a9a" }}>{pctLabel}</span>
+                    )}
+                    {amps.length > 1 && (
+                      <PressButton onClick={() => setAmps(a => a.filter((_, j) => j !== i))} style={{
+                        width: "18px", height: "18px", borderRadius: "50%", border: "1px solid #f8717140",
+                        background: "transparent", color: "#f87171", fontSize: "0.75rem", fontWeight: "700",
+                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+                      }}>×</PressButton>
+                    )}
+                  </div>
+                  <span
+                    onClick={() => setNumpadTarget({ key: `amp_${i}`, label: `Amplifier ${i+1}`, value: val, color: "#4ade80", isAmp: true, ampIndex: i })}
+                    style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "1.1rem", fontWeight: "800", color: val > 0 ? "#4ade80" : "#d0e0ec", cursor: "pointer", borderBottom: "1px dashed " + (val > 0 ? "#4ade8060" : "#2a3a50"), paddingBottom: "1px", minWidth: "40px", textAlign: "right" }}
+                  >
+                    {val}%
+                  </span>
+                </div>
+                <div style={{ fontSize: "0.68rem", color: "#d0e0ec", lineHeight: 1.4 }}>
+                  {i === 0 ? "e.g. Spotter, Ranger, Glass Cannon, Sadist — each amp multiplies separately" : "Multiplies separately with all other amps"}
+                </div>
+              </div>
+            );
+          })}
+
+
+          {/* Add amp button */}
+          <PressButton onClick={() => setAmps(a => [...a, 0])} style={{
+            width: "100%", padding: "0.4rem", borderRadius: "8px",
+            border: "1px dashed #4ade8040", background: "transparent",
+            color: "#4ade80", fontSize: "0.7rem", fontWeight: "700",
+            letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer",
+          }}>+ Add Amplifier Source</PressButton>
+
+        </Section>
+
+        <Section id="section-stats" title="Stats" summary={statsSummary}>
+          {STATS.map(cfg => (
+            <div key={cfg.key}>
+              <Slider cfg={cfg} value={vals[cfg.key]} onChange={set(cfg.key)} direction={dirFor(cfg.key)} subInfo={subFor(cfg.key)} contrib={contribFor(cfg.key)} pctStep={cfg.key === "rof" && startingSet ? 0.05 : null} pctBase={cfg.key === "rof" && startingSet ? snapshotVals.rof : null} />
+              {cfg.key === "cd" && <CritScales vals={vals} cx={cx} cy={cy} lx={lx} ly={ly} rx={rx} ry={ry} scalesColor={scalesColor} scalesLabel={scalesLabel} balanced={balanced} ccAtCap={ccAtCap} ccDiff={ccDiff} optimalCC={optimalCC} cdDiff={cdDiff} optimalCD={optimalCD} critMult={critMultForScales} gearMult={gearMultForScales} />}
+            </div>
+          ))}
+        </Section>
+
+        {/* Simulation chart */}
+        {simResult && (
+          <>
+            {/* Stats row */}
+            <div style={{ background: "#0a1525", border: "1px solid #1a3050", borderRadius: "10px", padding: "0.9rem 1.2rem", marginBottom: "0.6rem" }}>
+              <div style={{ fontSize: "0.65rem", letterSpacing: "0.15em", textTransform: "uppercase", color: "#d0e0ec", marginBottom: "0.6rem" }}>Stack Ramp Simulation</div>
+              <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                {[
+                  { label: "Start DPS",  val: simResult.startDPS,         color: "#94a3b8" },
+                  { label: "Peak DPS",   val: simResult.peakDPS,          color: "#22d3ee" },
+                  { label: "Avg Firing", val: simResult.avgFiringDPS,     color: "#4ade80" },
+                  { label: "True Sust.", val: simResult.trueSustainedDPS, color: "#fb923c" },
+                ].map(({ label, val, color }) => (
+                  <div key={label} style={{ flex: "1 0 calc(50% - 0.2rem)", background: "#060f1c", borderRadius: "6px", padding: "0.5rem 0.4rem", textAlign: "center", minWidth: 0 }}>
+                    <div style={{ fontSize: "0.70rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.2rem" }}>{label}</div>
+                    <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "1.05rem", fontWeight: "800", color }}>
+                      {val >= 1000 ? `${(val/1000).toFixed(1)}k` : val.toFixed(0)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Chart box */}
+            <div id="section-chart" className="section"
+              style={{
+                background: "#0a1525", border: "1px solid #1a3050", borderRadius: "10px",
+                padding: "0.8rem 0.8rem 0.6rem", marginBottom: "1rem",
+              }}
+              onClick={() => setChartClearFlag(f => f + 1)}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+                <div style={{ fontSize: "0.65rem", letterSpacing: "0.12em", textTransform: "uppercase", color: "#d0e0ec" }}>
+                  DPS RAMP — FULL RAMP <span style={{ color: "#b0c8d8" }}>· scroll → · use buttons to zoom</span>
+                </div>
+                <div style={{ display: "flex", gap: "0.3rem" }}>
+                  {[["−", 0], ["+", 1.33], ["⤢", null]].map(([label, factor]) => (
+                    <PressButton key={label} onClick={e => {
+                      e.stopPropagation();
+                      if (factor === null || factor === 0) { setChartZoom(chartFitZoom); }
+                      else { setChartZoom(z => Math.min(4, Math.max(0.05, z * factor))); }
+                    }}
+                      style={{ width: "40px", height: "40px", borderRadius: "8px", border: "1px solid #22d3ee40", background: "#22d3ee15", color: "#22d3ee", fontSize: label === "⤢" ? "1rem" : "1.3rem", fontWeight: "700", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {label}
+                    </PressButton>
+                  ))}
+                </div>
+              </div>
+              <DPSChart points={simResult.points} magDurationS={simResult.magDurationS} baseDPS={simResult.startDPS} snapPoints={frozenRamp} zoom={chartZoom} onZoomChange={setChartZoom} onFitZoom={setChartFitZoom} clearFlag={chartClearFlag} />
+              <div style={{ fontSize: "0.65rem", color: "#d0e0ec", marginTop: "0.4rem", textAlign: "center" }}>
+                Starting from 0 stacks · mag ends at {simResult.magDurationS.toFixed(2)}s
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Comparison results */}
+        <Section id="section-results" title="Results" summary={resultsSummary}>
+          {/* Per-bullet damage breakdown */}
+          {(() => {
+            const base     = current.baseDmg;
+            const allMults = (m) => {
+              const { wd=0, frenzyWD=0, twd=0, strikerTWD=0, obliterateTWD=0, dta=0, dth=0, dtooc=0, amps=[], flatlineAmp=0, hbAmp=1, expertise=0 } = activeMods;
+              const wdM  = 1 + (wd + frenzyWD) / 100;
+              const twdM = 1 + (twd + strikerTWD + obliterateTWD) / 100;
+              const dtM  = 1 + (dta + dth) / 100;
+              const oocM = 1 + dtooc / 100;
+              const ampM = [...amps, flatlineAmp].reduce((a, x) => a * (1 + x/100), hbAmp);
+              return base * wdM * twdM * dtM * oocM * ampM * m;
+            };
+            const normal    = allMults(1);
+            const crit      = allMults(1 + vals.cd / 100);
+            const hs        = allMults(1 + vals.hsd / 100);
+            const critHS    = allMults(1 + vals.cd / 100 + vals.hsd / 100);
+            const fmt = v => v >= 1000000 ? `${(v/1000000).toFixed(2)}M` : v >= 1000 ? `${(v/1000).toFixed(1)}k` : Math.round(v);
+            return (
+              <div style={{ marginBottom: "0.8rem", paddingBottom: "0.8rem", borderBottom: "1px solid #0d1a28" }}>
+                <div style={{ fontSize: "0.65rem", letterSpacing: "0.1em", textTransform: "uppercase", color: "#d0e0ec", marginBottom: "0.4rem" }}>Per Bullet Damage</div>
+                <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                  {[
+                    { label: "Normal",    val: normal, color: "#f97316" },
+                    { label: "Crit",      val: crit,   color: "#22d3ee" },
+                    { label: "Headshot",  val: hs,     color: "#f59e0b" },
+                    { label: "Crit + HS", val: critHS,  color: "#4ade80" },
+                  ].map(({ label, val, color }) => (
+                    <div key={label} style={{ flex: 1, minWidth: "70px", background: "#060f1c", borderRadius: "6px", padding: "0.3rem 0.5rem", border: "1px solid " + color + "30" }}>
+                      <div style={{ fontSize: "0.62rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</div>
+                      <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "0.95rem", fontWeight: "800", color }}>{fmt(val)}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+          <div style={{ margin: "0 -1.2rem" }}>
+          <div style={{ display: "flex", padding: "0.5rem 0.9rem", background: "#060f1c", borderBottom: "1px solid #1a3050" }}>
+            <span style={{ fontSize: "0.70rem", letterSpacing: "0.12em", textTransform: "uppercase", color: "#d0e0ec", flex: "0 0 90px" }}>Stat</span>
+            <span style={{ fontSize: "0.70rem", letterSpacing: "0.12em", textTransform: "uppercase", color: "#d0e0ec", flex: 1, textAlign: "right" }}>Starting</span>
+            <span style={{ width: "32px" }} />
+            <span style={{ fontSize: "0.70rem", letterSpacing: "0.12em", textTransform: "uppercase", color: "#d0e0ec", flex: 1 }}>Current</span>
+          </div>
+          <CompareRow label="Burst DPS"  startVal={snapshot.burstDPS}     newVal={current.burstDPS}     higherIsBetter={true} />
+          <CompareRow label="Sust. DPS"  startVal={snapshot.sustainedDPS}  newVal={current.sustainedDPS} higherIsBetter={true} />
+          <CompareRow label="Reload"     startVal={snapshot.reloadTime}    newVal={current.reloadTime}   unit="s" decimals={2} higherIsBetter={false} />
+          </div>
+        </Section>
+
+        {/* Overall total summary */}
+        {startingSet && (Math.abs(totalBurstPct) > 0.05 || Math.abs(totalSustainPct) > 0.05) && (
+          <div style={{
+            background: "#060f1c", border: "1px solid #1a3050", borderRadius: "8px",
+            padding: "0.7rem 0.9rem", marginBottom: "1rem",
+            display: "flex", justifyContent: "space-between", alignItems: "center"
+          }}>
+            <span style={{ fontSize: "0.65rem", letterSpacing: "0.12em", textTransform: "uppercase", color: "#d0e0ec" }}>
+              Overall Change
+            </span>
+            <div style={{ display: "flex", gap: "0.7rem" }}>
+              {[{ label: "Burst", pct: totalBurstPct }, { label: "Sustained", pct: totalSustainPct }].map(({ label, pct }) => (
+                <div key={label} style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: "0.70rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
+                  <span style={{
+                    fontFamily: "'Rajdhani',sans-serif", fontSize: "1.1rem", fontWeight: "800",
+                    color: pct >= 0 ? "#4ade80" : "#f87171"
+                  }}>
+                    {pct >= 0 ? "+" : ""}{pct.toFixed(1)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Save button */}
+        <PressButton onClick={saveEntry} style={{
+          width: "100%", padding: "0.75rem", marginBottom: "1rem",
+          background: "#0a1f35", border: "1px solid #1e4060", borderRadius: "10px",
+          color: "#4ade80", fontSize: "0.8rem", fontWeight: "700", letterSpacing: "0.12em",
+          textTransform: "uppercase", cursor: "pointer"
+        }}>
+          💾 Save Current Results
+        </PressButton>
+
+        {/* Saved entries */}
+        {saves.length > 0 && (
+          <div id="section-saves" className="section" style={{ background: "#0a1525", border: "1px solid #1a3050", borderRadius: "10px", overflow: "hidden", marginBottom: "1rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.7rem 1.2rem", background: "#060f1c", borderBottom: "1px solid #1a3050" }}>
+              <span style={{ fontSize: "0.68rem", letterSpacing: "0.15em", textTransform: "uppercase", color: "#8090b0", fontWeight: "700" }}>Saved Results <span style={{ color: "#4ade80" }}>({saves.length})</span></span>
+              <PressButton onClick={clearSaves} style={{ background: "none", border: "none", color: "#d0e0ec", fontSize: "0.65rem", cursor: "pointer" }}>Clear All</PressButton>
+            </div>
+            {saves.map((s, i) => (
+              <div key={i} style={{ padding: "0.7rem 0.9rem", borderBottom: i < saves.length - 1 ? "1px solid #0d1a28" : "none" }}>
+                <div style={{ fontSize: "0.72rem", color: "#d0e0ec", marginBottom: "0.4rem" }}>{s.timestamp}</div>
+                <div style={{ fontSize: "0.68rem", color: "#d0e0ec", marginBottom: "0.3rem" }}>
+                  DMG {s.settings.dmg.toLocaleString()} · CC {s.settings.cc}% · CHD {s.settings.cd}% · {s.settings.rof}RPM · Mag {s.settings.mag} · Reload {s.settings.baseReload}s
+                </div>
+                <div style={{ display: "flex", gap: "1rem" }}>
+                  <div>
+                    <div style={{ fontSize: "0.70rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.1em" }}>Start Burst</div>
+                    <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "0.9rem", fontWeight: "700", color: "#d0e0ec" }}>{s.startBurst.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                  </div>
+                  <div style={{ fontSize: "1rem", color: "#d0e0ec", alignSelf: "flex-end", paddingBottom: "2px" }}>→</div>
+                  <div>
+                    <div style={{ fontSize: "0.70rem", color: s.burstImproved ? "#4ade80" : "#f87171", textTransform: "uppercase", letterSpacing: "0.1em" }}>Final Burst</div>
+                    <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "0.9rem", fontWeight: "700", color: s.burstImproved ? "#4ade80" : "#f87171" }}>{s.currentBurst.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                  </div>
+                  <div style={{ marginLeft: "auto" }}>
+                    <div style={{ fontSize: "0.70rem", color: "#d0e0ec", textTransform: "uppercase", letterSpacing: "0.1em" }}>Sustained</div>
+                    <div style={{ fontFamily: "'Rajdhani',sans-serif", fontSize: "0.9rem", fontWeight: "700", color: s.sustainImproved ? "#4ade80" : "#f87171" }}>{s.currentSustain.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ textAlign: "center", fontSize: "0.70rem", color: "#c0d4e4", letterSpacing: "0.09em" }}>
+          TAP VALUE TO TYPE · BURST = DMG × RoF × CRIT · SUSTAINED FACTORS IN RELOAD
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
