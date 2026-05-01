@@ -1,0 +1,13 @@
+{
+  "background_color": "#070e1a",
+  "dir": "ltr",
+  "display": "standalone",
+  "name": "Division 2 DPS Calculator",
+  "orientation": "any",
+  "scope": "/",
+  "short_name": "Div2DpsCalc",
+  "start_url": "/div2-dps-calc(20).html",
+  "theme_color": "#070e1a",
+  "id": "DpsCalc",
+  "description": "Calculate and compare weapon DPS for The Division 2"
+}
